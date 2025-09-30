@@ -1,4 +1,13 @@
-.env
+# Python
 __pycache__/
 *.pyc
-vectorstore/
+.venv/
+.vscode/
+.idea/
+ECHO is on.
+# Secrets
+.env
+ECHO is on.
+# Keep FAISS vectorstores in repo
+!vectorstore_scripts/**
+!vectorstore_assignments/**

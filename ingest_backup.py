@@ -1,4 +1,4 @@
-# ingest.py — PDF loader with optional OCR fallback and multi-index support (ASCII-only)
+# ingest.py — PDF loader with optional OCR fallback and multi-index support
 import os, json, hashlib, argparse
 from pathlib import Path
 from typing import List
@@ -9,9 +9,6 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 from langchain_core.documents import Document
-
-from dotenv import load_dotenv
-load_dotenv(override=True)   # force .env to override stale env vars
 
 def sha256(s: str) -> str:
     import hashlib
@@ -69,8 +66,7 @@ def load_documents(input_dir: Path, use_ocr: bool, ocr_lang: str) -> List[Docume
 
 def split_docs(docs: List[Document]) -> List[Document]:
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1200,
-        chunk_overlap=150,
+        chunk_size=1200, chunk_overlap=150,
         separators=["\n\n", "\n", ". ", " ", ""]
     )
     return splitter.split_documents(docs)
@@ -97,31 +93,27 @@ def main():
     use_ocr    = is_truthy(args.use_ocr)
     ocr_lang   = args.ocr_lang
 
-    vector_dir = output_dir
-    hash_db_path = vector_dir / "dochashes.json"
+    VECTOR_DIR = output_dir
+    HASH_DB    = VECTOR_DIR / "dochashes.json"
 
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
     vs = None
-    if (vector_dir / "index.faiss").exists():
-        emb_for_load = OpenAIEmbeddings(
-            model=os.getenv("EMBED_MODEL", "text-embedding-3-large"),
-            api_key=os.getenv("OPENAI_API_KEY")
-        )
+    if (VECTOR_DIR / "index.faiss").exists():
         vs = FAISS.load_local(
-            str(vector_dir),
-            emb_for_load,
+            str(VECTOR_DIR),
+            OpenAIEmbeddings(model=os.getenv("EMBED_MODEL","text-embedding-3-large")),
             allow_dangerous_deserialization=True
         )
 
-    print(f"Ingesting from '{input_dir}' -> '{output_dir}'  (OCR={'ON' if use_ocr else 'OFF'}  lang={ocr_lang})")
+    print(f"Ingesting from '{input_dir}' → '{output_dir}'  (OCR={'ON' if use_ocr else 'OFF'}  lang={ocr_lang})")
     raw_pages = load_documents(input_dir, use_ocr, ocr_lang)
     print(f"Loaded {len(raw_pages)} pages (pre-split).")
 
     chunks = split_docs(raw_pages)
     print(f"Produced {len(chunks)} chunks.")
 
-    hash_db = load_hash_db(hash_db_path)
+    hash_db = load_hash_db(HASH_DB)
     page_hashes = hash_db["page_hashes"]
 
     to_add = []
@@ -136,20 +128,17 @@ def main():
         print("Nothing new to add. Index is up to date.")
         return
 
-    print(f"Embedding {len(to_add)} new chunks...")
-    embeddings = OpenAIEmbeddings(
-        model=os.getenv("EMBED_MODEL", "text-embedding-3-large"),
-        api_key=os.getenv("OPENAI_API_KEY")
-    )
+    print(f"Embedding {len(to_add)} new chunks…")
+    embeddings = OpenAIEmbeddings(model=os.getenv("EMBED_MODEL","text-embedding-3-large"))
     if vs is None:
         vs = FAISS.from_documents(to_add, embeddings)
     else:
         vs.add_documents(to_add, embeddings=embeddings)
 
-    vector_dir.mkdir(parents=True, exist_ok=True)
-    vs.save_local(str(vector_dir))
-    save_hash_db(hash_db_path, hash_db)
-    print("OK: Ingestion complete.")
+    VECTOR_DIR.mkdir(parents=True, exist_ok=True)
+    vs.save_local(str(VECTOR_DIR))
+    save_hash_db(HASH_DB, hash_db)
+    print("✅ Ingestion complete.")
 
 if __name__ == "__main__":
     main()
