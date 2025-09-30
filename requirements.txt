@@ -1,6 +1,24 @@
-streamlit
-python-dotenv
-langchain
-langchain-community
-langchain-openai
-faiss-cpu
+# Core app framework
+streamlit>=1.36.0
+python-dotenv>=1.0.1
+
+# LangChain & OpenAI
+langchain>=0.2.9
+langchain-community>=0.2.7
+langchain-openai>=0.1.20
+openai>=1.44.0
+
+# Vector store
+faiss-cpu>=1.8.0
+
+# PDF and document parsing
+pymupdf>=1.24.9   # fitz, for reading PDFs
+PyPDF2>=3.0.1     # PDF reader for student uploads
+docx2txt>=0.8     # Word (.docx) uploads
+
+# OCR support (for ingestion)
+pillow>=10.4.0
+pytesseract>=0.3.10
+
+# Utilities
+tqdm>=4.66.4
