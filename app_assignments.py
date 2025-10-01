@@ -53,7 +53,7 @@ st.caption("Select your assignment, ask non-spoiler questions, upload drafts, an
 def str2bool(x: str) -> bool:
     return str(x).strip().lower() in {"1", "true", "yes", "on"}
 
-IS_LOCAL = os.getenv("LOCAL_DEV", "0") == "1"                         # set in .env locally if desired
+IS_LOCAL = os.getenv("LOCAL_DEV", "0") == "1"                         # optional: set in .env locally
 ALLOW_DEBUG = str2bool(get_secret("DEBUG_MODE", "false") or "false")  # set in Streamlit Cloud Secrets
 DEBUG_ALLOWED = IS_LOCAL or ALLOW_DEBUG
 
@@ -278,3 +278,205 @@ def render_sources_grouped(scripts_docs: List[Any], assign_docs: List[Any]):
     with cols[0]:
         st.markdown("**From scripts (methods & theory):**")
         if scripts_docs:
+            for i, d in enumerate(scripts_docs, 1):
+                name, page = nice_src(d.metadata or {})
+                st.write(f"{i}. {name}" + (f" — page {page}" if page is not None else ""))
+        else:
+            st.caption("_(none)_")
+    with cols[1]:
+        st.markdown("**From assignments (deliverables & case):**")
+        if assign_docs:
+            for i, d in enumerate(assign_docs, 1):
+                name, page = nice_src(d.metadata or {})
+                st.write(f"{i}. {name}" + (f" — page {page}" if page is not None else ""))
+        else:
+            st.caption("_(none)_")
+
+def show_debug_table(pairs: List[Tuple[Any,float]], header: str = "Retrieval debug (ranked hits)"):
+    if not DEBUG or not pairs:
+        return
+    rows = []
+    for rank,(d,score) in enumerate(pairs, start=1):
+        md = d.metadata or {}
+        rows.append({
+            "rank": rank,
+            "corpus": tag_corpus(md),
+            "score": float(score),
+            "module": md.get("module",""),
+            "source": md.get("source",""),
+            "page": md.get("page",""),
+        })
+    st.subheader(header)
+    st.dataframe(rows, use_container_width=True)
+
+# -------------------- Sidebar: self-test (only when debug allowed) --------------------
+if DEBUG_ALLOWED and st.sidebar.button("Run retrieval self-test"):
+    info = {
+        "scripts_dir_exists": INDEX_SCRIPTS.exists(),
+        "assign_dir_exists": INDEX_ASSIGN.exists(),
+        "scripts_loaded": vs_scripts is not None,
+        "assign_loaded":  vs_assign  is not None,
+        "scripts_error": scripts_err,
+        "assign_error":  assign_err,
+    }
+    test_q = "What is the Play-to-Win framework?"
+    if vs_assign:
+        try:
+            a_docs = vs_assign.similarity_search(test_q, k=3)
+            info["assign_hits"] = len(a_docs)
+            info["assign_example_source"] = (a_docs[0].metadata or {}).get("source","") if a_docs else None
+        except Exception as e:
+            info["assign_probe_error"] = str(e)
+    if vs_scripts:
+        try:
+            s_docs = vs_scripts.similarity_search(test_q, k=3)
+            info["scripts_hits"] = len(s_docs)
+            info["scripts_example_source"] = (s_docs[0].metadata or {}).get("source","") if s_docs else None
+        except Exception as e:
+            info["scripts_probe_error"] = str(e)
+
+    st.success("Self-test complete. See sidebar for details.")
+    debug_log("Self-test results", info)
+
+# -------------------- UI: assignment selection --------------------
+colA, colB = st.columns([2,1])
+with colA:
+    selected = st.selectbox("Which assignment are you working on?", ASSIGNMENTS, index=0)
+with colB:
+    if st.button("Reveal next hint"):
+        st.session_state["hints_shown"] += 1
+
+# -------------------- Q&A (non-spoiler) --------------------
+st.subheader("Ask a question")
+with st.form("qa"):
+    q = st.text_input(
+        "Your question about the assignment:",
+        placeholder="e.g., How to design metrics that inform Playing Field and Strategic Priorities?"
+    )
+    go = st.form_submit_button("Ask")
+
+if go and q.strip():
+    with st.spinner("Thinking..."):
+        st.session_state["hist_assign"].append(("user", q))
+        q_tagged = f"[Assignment: {selected}] {q}"
+
+        # If asking for the solution, refuse politely
+        if is_solution_seeking(q):
+            ans = (
+                "I can’t give you the solution directly. Let’s keep this non-spoiler:\n\n"
+                "• Use the assignment brief to list deliverables and clarify scope.\n"
+                "• Use the scripts to pick the right frameworks and structure your reasoning.\n"
+                "• Draft your approach and upload it here — I’ll give feedback against the instructor notes."
+            )
+            scripts_docs, assign_docs, retrieved_pairs = [], [], []
+
+        else:
+            allowed = ASSIGNMENT_TO_MODULES.get(selected, [])
+            retrieved_pairs, scripts_docs, assign_docs = dual_retrieve(
+                query=q_tagged,
+                allowed_modules=allowed,
+                k_total=8,
+                k_assign=3,
+                k_scripts_target=5
+            )
+
+            # Build split contexts (cap lengths just to be safe)
+            scripts_context = "\n\n".join([d.page_content for d in scripts_docs])[:6000]
+            assign_context  = "\n\n".join([d.page_content for d in assign_docs])[:4000]
+
+            llm = ChatOpenAI(model=CHAT_MODEL, api_key=OPENAI_API_KEY, temperature=0.0)
+            user_prompt = NON_SPOILER_USER_TEMPLATE.format(
+                assignment=selected,
+                question=q,
+                scripts_context=scripts_context,
+                assign_context=assign_context
+            )
+            ans = llm.invoke([
+                {"role": "system", "content": NON_SPOILER_SYSTEM},
+                {"role": "user", "content": user_prompt}
+            ]).content
+
+        st.session_state["hist_assign"].append(("assistant", ans))
+
+        st.markdown("### Answer (non-spoiler)")
+        st.write(ans)
+
+        # Sources panel (grouped) or guardrail note
+        if not is_solution_seeking(q):
+            render_sources_grouped(scripts_docs, assign_docs)
+            show_debug_table(retrieved_pairs, header="Retrieval debug (ranked hits)")
+        else:
+            st.markdown("### Sources")
+            st.write("_No sources for solution-seeking prompts (guardrail)._")
+
+# -------------------- Upload & feedback (assignments only) --------------------
+st.subheader("Upload your draft for feedback")
+uploaded = st.file_uploader("Upload PDF/DOCX/TXT", type=["pdf", "docx", "txt"], accept_multiple_files=False)
+
+def feedback_system(assign_name: str) -> str:
+    return (
+        f"You are a teaching assistant evaluating a student draft for '{assign_name}'. "
+        "Use ONLY the retrieved instructor notes and assignment brief. Provide:\n"
+        "1) Completeness vs deliverables\n"
+        "2) Strengths & weaknesses\n"
+        "3) Gaps or incorrect assumptions\n"
+        "4) 3–5 prioritized next steps\n"
+        "Cite file names/pages when possible."
+    )
+
+def read_any(upload) -> str:
+    ext = upload.name.lower().split(".")[-1]
+    data = upload.read()
+    if ext == "pdf":
+        return read_pdf(BytesIO(data))
+    if ext == "docx":
+        return read_docx(BytesIO(data))
+    return data.decode("utf-8", errors="ignore")
+
+if uploaded is not None and st.button("Analyze submission"):
+    with st.spinner("Evaluating your submission..."):
+        try:
+            text = read_any(uploaded)
+        except Exception as e:
+            st.error(f"Could not read file: {e}")
+            text = ""
+
+        if text.strip():
+            focus_q = f"[Instructor Notes][Assignment: {selected}] rubric, deliverables, evaluation criteria, common pitfalls"
+            try:
+                notes_docs = vs_assign.similarity_search(focus_q, k=5) if vs_assign else []
+            except Exception as e:
+                notes_docs = []
+                debug_log("assignment notes retrieval error", {"error": str(e)})
+
+            notes_text = "\n\n".join([d.page_content for d in notes_docs])[:6000]
+
+            llm = ChatOpenAI(model=CHAT_MODEL, api_key=OPENAI_API_KEY, temperature=0.0)
+            review = llm.invoke([
+                {"role": "system", "content": feedback_system(selected)},
+                {"role": "user", "content": f"--- STUDENT SUBMISSION ---\n{text[:9000]}\n\n--- INSTRUCTOR NOTES ---\n{notes_text}"},
+            ]).content
+
+            st.markdown("### Feedback")
+            st.write(review)
+
+            if notes_docs:
+                st.markdown("### Sources used")
+                for i, d in enumerate(notes_docs, 1):
+                    name, page = nice_src(d.metadata or {})
+                    st.write(f"{i}. {name}" + (f" — page {page}" if page else ""))
+
+# -------------------- Hints / progression --------------------
+if st.session_state["hints_shown"] > 0:
+    st.subheader("Hints")
+    hints = [
+        "Level 1: Re-read the assignment brief and list the deliverables.",
+        "Level 2: Connect your reasoning to the Strategy-in-Action Canvas choices.",
+        "Level 3: Use evidence from scripts (quote + page) to support your recommendation.",
+    ]
+    for i in range(min(st.session_state["hints_shown"], len(hints))):
+        st.markdown(f"- {hints[i]}")
+
+with st.expander("Chat history"):
+    for role, msg in st.session_state["hist_assign"]:
+        st.markdown(f"**{'You' if role=='user' else 'Assistant'}:** {msg}")
