@@ -1,6 +1,2 @@
-streamlit
-python-dotenv
-langchain
-langchain-community
-langchain-openai
-faiss-cpu
+pytesseract
+pillow
