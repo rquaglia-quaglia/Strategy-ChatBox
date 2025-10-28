@@ -3,7 +3,7 @@
 
 import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, List
 
 import streamlit as st
 
@@ -38,7 +38,7 @@ if not OPENAI_API_KEY:
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 
 # --- UI ---
 st.set_page_config(page_title="Course Chatbot", page_icon="🎓", layout="wide")
@@ -94,11 +94,19 @@ if vs_err:
     st.error("❌ Failed to load vectorstore_scripts")
     debug_log("scripts_vs load error", {"error": vs_err})
 
-# Build retriever & LLM
-retriever = vs_scripts.as_retriever(search_kwargs={"k": 5}) if vs_scripts else None
+# --- Retrieval helper: use FAISS directly (avoids retriever/pydantic quirk) ---
+def retrieve_docs(query: str, k: int = 5) -> List[Any]:
+    if not vs_scripts:
+        return []
+    try:
+        return vs_scripts.similarity_search(query, k=k)
+    except Exception as e:
+        debug_log("similarity_search error", {"error": str(e)})
+        return []
+
+# Build LLM + prompt
 llm = ChatOpenAI(model=CHAT_MODEL, api_key=OPENAI_API_KEY, temperature=0.0)
 
-# Prompt for RAG
 prompt = ChatPromptTemplate.from_messages([
     ("system",
      "You are a helpful teaching assistant for the course scripts. "
@@ -107,15 +115,18 @@ prompt = ChatPromptTemplate.from_messages([
     ("human", "Question: {question}\n\nContext:\n{context}\n\nAnswer:")
 ])
 
-def format_docs(docs):
+def format_docs(docs: List[Any]) -> str:
     return "\n\n---\n".join(d.page_content for d in docs)
 
-# Modern RAG chain: (question) -> retrieve -> format -> prompt -> LLM
+# Modern RAG chain: (question) -> similarity_search -> format -> prompt -> LLM
 rag_chain = (
-    {"context": retriever | format_docs, "question": RunnablePassthrough()}  # pass q through; use retriever for context
+    {
+        "context": RunnableLambda(lambda q: format_docs(retrieve_docs(q, k=5))),
+        "question": RunnablePassthrough(),
+    }
     | prompt
     | llm
-) if retriever else None
+) if vs_scripts else None
 
 # Sidebar self-test (only when debug allowed)
 if DEBUG_ALLOWED and st.sidebar.button("Run retrieval self-test"):
@@ -124,14 +135,13 @@ if DEBUG_ALLOWED and st.sidebar.button("Run retrieval self-test"):
         "scripts_loaded": vs_scripts is not None,
         "scripts_error": vs_err,
     }
-    if retriever:
-        try:
-            test_q = "What is the Play-to-Win framework?"
-            hits = retriever.get_relevant_documents(test_q)
-            info["hit_count"] = len(hits)
-            info["example_source"] = (hits[0].metadata or {}).get("source","") if hits else None
-        except Exception as e:
-            info["probe_error"] = str(e)
+    try:
+        test_q = "What is the Play-to-Win framework?"
+        hits = retrieve_docs(test_q, k=3)
+        info["hit_count"] = len(hits)
+        info["example_source"] = (hits[0].metadata or {}).get("source","") if hits else None
+    except Exception as e:
+        info["probe_error"] = str(e)
     st.success("Self-test complete. See sidebar for details.")
     debug_log("Self-test results", info)
 
@@ -149,7 +159,7 @@ if go and q.strip():
     else:
         with st.spinner("Thinking..."):
             # Retrieve docs (for sources panel)
-            docs = retriever.get_relevant_documents(q)
+            docs = retrieve_docs(q, k=5)
 
             # Generate answer
             answer = rag_chain.invoke(q).content
